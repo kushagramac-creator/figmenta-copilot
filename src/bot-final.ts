@@ -1,28 +1,26 @@
-import { Client, GatewayIntentBits, Message } from 'discord.js';
+import { Client, GatewayIntentBits } from 'discord.js';
 import { createClient } from '@supabase/supabase-js';
 import dotenv from 'dotenv';
 import http from 'http';
 
-dotenv.config({ path: '.env.local' });
+// 1. Load Environment Variables
+dotenv.config();
 
-// --- 1. RENDER FREE TIER HACK (MUST BE AT THE TOP) ---
-// This fools Render into thinking this is a website so it doesn't crash.
-const port = process.env.PORT || 3000;
-const server = http.createServer((req, res) => {
-  res.writeHead(200, { 'Content-Type': 'text/plain' });
-  res.write("Bot is Alive!");
-  res.end();
-});
+// --- PROFESSIONAL LOGGER UTILITY ---
+// This adds timestamps and emojis to make your logs easy to read on Render
+const log = {
+  info: (msg: string) => console.log(`[${new Date().toISOString()}] ℹ️  INFO: ${msg}`),
+  success: (msg: string) => console.log(`[${new Date().toISOString()}] ✅ SUCCESS: ${msg}`),
+  error: (msg: string, err?: any) => console.error(`[${new Date().toISOString()}] ❌ ERROR: ${msg}`, err || ''),
+  chat: (user: string, msg: string) => console.log(`[${new Date().toISOString()}] 💬 CHAT: [${user}] ${msg}`)
+};
 
-server.listen(port, () => {
-  console.log(`✅ Dummy Server running on port ${port}`);
-});
+// 2. Setup Supabase (The Database)
+const supabaseUrl = process.env.SUPABASE_URL!;
+const supabaseKey = process.env.SUPABASE_KEY!;
+const supabase = createClient(supabaseUrl, supabaseKey);
 
-console.log("------------------------------------------------");
-console.log("🚀 STARTING BOT V2 (GEMINI 2.5 FLASH EDITION)");
-console.log("------------------------------------------------");
-
-// --- 2. SETUP CLIENTS ---
+// 3. Setup Discord Bot
 const discord = new Client({
   intents: [
     GatewayIntentBits.Guilds,
@@ -31,99 +29,102 @@ const discord = new Client({
   ],
 });
 
-const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
-);
-
-// --- 3. THE BRAIN (DIRECT API CONNECTION) ---
-async function askGemini(prompt: string) {
-  const apiKey = process.env.GEMINI_API_KEY;
-  // Using Gemini 2.5 Flash as discovered in your account
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`;
-
-  const response = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      contents: [{ parts: [{ text: prompt }] }]
-    })
-  });
-
-  const data = await response.json();
-  
-  if (!response.ok) {
-    console.error("❌ Google API Error:", JSON.stringify(data, null, 2));
-    return "I cannot reach my brain right now.";
-  }
-
-  return data.candidates?.[0]?.content?.parts?.[0]?.text || "No response.";
-}
-
-// --- 4. EVENT LISTENERS ---
-discord.once('ready', () => {
-  console.log(`✅ AI Bot is online: ${discord.user?.tag}`);
-  console.log(`✅ Model selected: gemini-2.5-flash`);
+// 4. EVENT: Bot is Online
+discord.once('clientReady', async () => {
+  log.success(`AI Bot is online as: ${discord.user?.tag}`);
+  log.info(`Model selected: gemini-1.5-flash (Stable)`);
 });
 
-discord.on('messageCreate', async (message: Message) => {
-  if (message.author.bot || !message.content) return;
+// 5. EVENT: Message Received
+discord.on('messageCreate', async (message) => {
+  // Ignore messages from the bot itself
+  if (message.author.bot) return;
+
+  log.chat(message.author.username, message.content);
 
   try {
-    // @ts-ignore
-    await message.channel.sendTyping();
+    // A. GET PERSONALITY from Database
+    // We check the 'bot_config' table to see if you changed the system prompt
+    let systemInstruction = "You are a helpful AI assistant for Figmenta.";
+    const { data: configData } = await supabase
+      .from('bot_config')
+      .select('system_instruction')
+      .order('id', { ascending: false }) // Get the latest rule
+      .limit(1)
+      .single();
 
-    // A. Save User Message
-    await supabase.from('chat_logs').insert({
-      channel_id: message.channelId,
-      user_name: message.author.username,
-      message_content: message.content,
-      is_bot: false
+    if (configData?.system_instruction) {
+      systemInstruction = configData.system_instruction;
+    }
+
+    // B. SAVE USER MESSAGE to Database (for the Dashboard)
+    // We do this immediately so it shows up on the website in real-time
+    await supabase.from('chat_logs').insert([
+      {
+        channel_id: message.channelId,
+        user_name: message.author.username,
+        message_content: message.content,
+        is_bot: false,
+      }
+    ]);
+
+    // C. ASK GEMINI (The Brain)
+    const apiKey = process.env.GEMINI_API_KEY;
+    // SWITCHED TO 1.5-FLASH FOR STABILITY (1,500 messages/day)
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`;
+
+    const payload = {
+      contents: [
+        {
+          role: "user",
+          parts: [{ text: `System: ${systemInstruction}\nUser: ${message.content}` }]
+        }
+      ]
+    };
+
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
     });
 
-    // B. Get Config
-    const { data: config } = await supabase.from('bot_config').select('*').single();
-    
-    // C. Get Context
-    const { data: history } = await supabase
-      .from('chat_logs')
-      .select('*')
-      .eq('channel_id', message.channelId)
-      .order('created_at', { ascending: false })
-      .limit(6); 
+    const data = await response.json();
 
-    const chatHistory = history?.reverse().map(msg => 
-      `${msg.is_bot ? 'AI' : msg.user_name}: ${msg.message_content}`
-    ).join('\n') || "";
+    // D. EXTRACT ANSWER
+    let reply = "I cannot reach my brain right now.";
+    if (data.candidates && data.candidates[0].content.parts[0].text) {
+      reply = data.candidates[0].content.parts[0].text;
+    }
 
-    const prompt = `
-      Instructions: ${config?.system_instruction || "You are a helpful AI."}
-      
-      HISTORY:
-      ${chatHistory}
-      
-      CURRENT MESSAGE:
-      ${message.author.username}: ${message.content}
-      
-      Reply:
-    `;
+    // E. REPLY TO DISCORD
+    await message.reply(reply);
+    log.success(`Replied to ${message.author.username}`);
 
-    // D. Ask Gemini
-    const response = await askGemini(prompt);
-
-    // E. Reply & Save
-    await message.reply(response);
-    await supabase.from('chat_logs').insert({
-      channel_id: message.channelId,
-      user_name: 'Bot',
-      message_content: response,
-      is_bot: true
-    });
+    // F. SAVE BOT REPLY to Database
+    await supabase.from('chat_logs').insert([
+      {
+        channel_id: message.channelId,
+        user_name: "Figmenta Copilot",
+        message_content: reply,
+        is_bot: true,
+      }
+    ]);
 
   } catch (error) {
-    console.error("❌ INTERNAL ERROR:", error);
-    await message.reply("My code crashed. Check the terminal.");
+    log.error("Failed to process message", error);
+    await message.reply("I encountered a critical error. Please check my logs.");
   }
 });
 
+// 6. DUMMY SERVER (Keeps Render Happy)
+// Render requires a web service to listen on a port, or it kills the app.
+const server = http.createServer((req, res) => {
+  res.writeHead(200);
+  res.end('Figmenta Bot is Running!');
+});
+server.listen(10000, () => {
+  log.success('Dummy Server running on port 10000');
+});
+
+// 7. LOGIN
 discord.login(process.env.DISCORD_TOKEN);
