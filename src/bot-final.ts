@@ -3,11 +3,9 @@ import { createClient } from '@supabase/supabase-js';
 import dotenv from 'dotenv';
 import http from 'http';
 
-// 1. Load Environment Variables
 dotenv.config();
 
-// --- PROFESSIONAL LOGGER UTILITY ---
-// This adds timestamps and emojis to make your logs easy to read on Render
+// --- LOGGER ---
 const log = {
   info: (msg: string) => console.log(`[${new Date().toISOString()}] ℹ️  INFO: ${msg}`),
   success: (msg: string) => console.log(`[${new Date().toISOString()}] ✅ SUCCESS: ${msg}`),
@@ -15,123 +13,84 @@ const log = {
   chat: (user: string, msg: string) => console.log(`[${new Date().toISOString()}] 💬 CHAT: [${user}] ${msg}`)
 };
 
-// 2. Setup Supabase (The Database) - DEBUG MODE
+// --- SUPABASE SETUP ---
 const supabaseUrl = process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL;
 const supabaseKey = process.env.SUPABASE_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
 
 if (!supabaseUrl || !supabaseKey) {
-  console.error("❌ FATAL ERROR: Supabase Credentials Missing!");
-  console.error("I see the following keys in Render:", Object.keys(process.env).filter(k => k.includes('SUPABASE')));
-  process.exit(1); // Stop the bot so it doesn't just crash randomly
+  log.error("Supabase Credentials Missing in Render Environment!");
+  process.exit(1);
 }
-
 const supabase = createClient(supabaseUrl, supabaseKey);
 
-// 3. Setup Discord Bot
+// --- DISCORD SETUP ---
 const discord = new Client({
-  intents: [
-    GatewayIntentBits.Guilds,
-    GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.MessageContent,
-  ],
+  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent],
 });
 
-// 4. EVENT: Bot is Online
 discord.once('clientReady', async () => {
   log.success(`AI Bot is online as: ${discord.user?.tag}`);
   log.info(`Model selected: gemini-1.5-flash (Stable)`);
 });
 
-// 5. EVENT: Message Received
 discord.on('messageCreate', async (message) => {
-  // Ignore messages from the bot itself
   if (message.author.bot) return;
-
   log.chat(message.author.username, message.content);
 
   try {
-    // A. GET PERSONALITY from Database
-    // We check the 'bot_config' table to see if you changed the system prompt
-    let systemInstruction = "You are a helpful AI assistant for Figmenta.";
-    const { data: configData } = await supabase
-      .from('bot_config')
-      .select('system_instruction')
-      .order('id', { ascending: false }) // Get the latest rule
-      .limit(1)
-      .single();
+    // 1. Get Personality
+    let systemInstruction = "You are a helpful AI.";
+    const { data: configData } = await supabase.from('bot_config').select('system_instruction').limit(1).single();
+    if (configData?.system_instruction) systemInstruction = configData.system_instruction;
 
-    if (configData?.system_instruction) {
-      systemInstruction = configData.system_instruction;
+    // 2. Log User Message
+    await supabase.from('chat_logs').insert([{
+      channel_id: message.channelId, user_name: message.author.username, message_content: message.content, is_bot: false
+    }]);
+
+    // 3. CALL GEMINI (With Debugging)
+    const apiKey = process.env.GEMINI_API_KEY;
+    if (!apiKey) {
+        log.error("GEMINI_API_KEY is missing in Render Environment Variables!");
+        await message.reply("My API Key is missing.");
+        return;
     }
 
-    // B. SAVE USER MESSAGE to Database (for the Dashboard)
-    // We do this immediately so it shows up on the website in real-time
-    await supabase.from('chat_logs').insert([
-      {
-        channel_id: message.channelId,
-        user_name: message.author.username,
-        message_content: message.content,
-        is_bot: false,
-      }
-    ]);
-
-    // C. ASK GEMINI (The Brain)
-    const apiKey = process.env.GEMINI_API_KEY;
-    // SWITCHED TO 1.5-FLASH FOR STABILITY (1,500 messages/day)
     const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`;
-
-    const payload = {
-      contents: [
-        {
-          role: "user",
-          parts: [{ text: `System: ${systemInstruction}\nUser: ${message.content}` }]
-        }
-      ]
-    };
-
     const response = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload)
+      body: JSON.stringify({
+        contents: [{ role: "user", parts: [{ text: `System: ${systemInstruction}\nUser: ${message.content}` }] }]
+      })
     });
 
     const data = await response.json();
 
-    // D. EXTRACT ANSWER
+    // --- THE TRAP: CATCH THE SILENT ERROR ---
+    if (!response.ok) {
+        log.error(`GOOGLE REFUSED: Status ${response.status}`);
+        log.error(`GOOGLE SAYS:`, JSON.stringify(data, null, 2)); // <--- THIS IS WHAT WE NEED
+        await message.reply(`My brain returned an error: ${response.status}`);
+        return;
+    }
+
     let reply = "I cannot reach my brain right now.";
     if (data.candidates && data.candidates[0].content.parts[0].text) {
       reply = data.candidates[0].content.parts[0].text;
     }
 
-    // E. REPLY TO DISCORD
     await message.reply(reply);
-    log.success(`Replied to ${message.author.username}`);
-
-    // F. SAVE BOT REPLY to Database
-    await supabase.from('chat_logs').insert([
-      {
-        channel_id: message.channelId,
-        user_name: "Figmenta Copilot",
-        message_content: reply,
-        is_bot: true,
-      }
-    ]);
+    await supabase.from('chat_logs').insert([{
+      channel_id: message.channelId, user_name: "Figmenta Copilot", message_content: reply, is_bot: true
+    }]);
 
   } catch (error) {
-    log.error("Failed to process message", error);
-    await message.reply("I encountered a critical error. Please check my logs.");
+    log.error("CRITICAL CRASH", error);
+    await message.reply("I crashed. Check logs.");
   }
 });
 
-// 6. DUMMY SERVER (Keeps Render Happy)
-// Render requires a web service to listen on a port, or it kills the app.
-const server = http.createServer((req, res) => {
-  res.writeHead(200);
-  res.end('Figmenta Bot is Running!');
-});
-server.listen(10000, () => {
-  log.success('Dummy Server running on port 10000');
-});
-
-// 7. LOGIN
+const server = http.createServer((req, res) => { res.writeHead(200); res.end('Bot Running'); });
+server.listen(10000);
 discord.login(process.env.DISCORD_TOKEN);
