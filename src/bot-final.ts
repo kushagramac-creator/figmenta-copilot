@@ -50,8 +50,8 @@ discord.on('messageCreate', async (message) => {
 
     // 3. CALL GEMINI (Using the VERIFIED model from your logs)
     const apiKey = process.env.GEMINI_API_KEY;
-    // We are using the exact ID found in your diagnostic logs:
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-exp:generateContent?key=${apiKey}`;
+    // Use the Stable Alias "gemini-flash-latest" (Found in your logs)
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent?key=${apiKey}`;
 
     const response = await fetch(url, {
       method: 'POST',
