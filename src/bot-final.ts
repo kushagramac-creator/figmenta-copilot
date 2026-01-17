@@ -56,8 +56,8 @@ discord.on('messageCreate', async (message) => {
         return;
     }
 
-    // Fix: Use the specific version "001" which is guaranteed to exist
-const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-001:generateContent?key=${apiKey}`;
+    // FALLBACK: Use the original "gemini-pro" which is available everywhere
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key=${apiKey}`;
     const response = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
