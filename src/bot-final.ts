@@ -15,9 +15,16 @@ const log = {
   chat: (user: string, msg: string) => console.log(`[${new Date().toISOString()}] 💬 CHAT: [${user}] ${msg}`)
 };
 
-// 2. Setup Supabase (The Database)
-const supabaseUrl = process.env.SUPABASE_URL!;
-const supabaseKey = process.env.SUPABASE_KEY!;
+// 2. Setup Supabase (The Database) - DEBUG MODE
+const supabaseUrl = process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL;
+const supabaseKey = process.env.SUPABASE_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+
+if (!supabaseUrl || !supabaseKey) {
+  console.error("❌ FATAL ERROR: Supabase Credentials Missing!");
+  console.error("I see the following keys in Render:", Object.keys(process.env).filter(k => k.includes('SUPABASE')));
+  process.exit(1); // Stop the bot so it doesn't just crash randomly
+}
+
 const supabase = createClient(supabaseUrl, supabaseKey);
 
 // 3. Setup Discord Bot
